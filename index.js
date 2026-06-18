@@ -33,6 +33,11 @@ async function run() {
         await client.connect();
         const db = client.db("ReadHaus");
 
+        // Data Base here
+        const users = db.collection("users");
+
+
+
 
 
         // await client.db("admin").command({ ping: 1 });
