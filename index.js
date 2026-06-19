@@ -42,13 +42,65 @@ async function run() {
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
 
-        // ================= GET ALL BOOKS =================
+        // ================= GET ALL BOOKS (WITH ADVANCED SEARCH, FILTER & PAGINATION) =================
         app.get("/api/books", async (req, res) => {
             try {
-                const books = await booksCollection.find().toArray();
-                res.json(books);
+                // ফ্রন্টএন্ড থেকে কুয়েরি প্যারামিটারগুলো রিসিভ করা হচ্ছে
+                const { search, category, minFee, maxFee, availability, page = 1, limit = 6 } = req.query;
+
+                // ১. ডাইনামিক কুয়েরি অবজেক্ট তৈরি
+                let query = {};
+
+                // কন্ডিশন: সাধারণ ইউজাররা শুধু Published অথবা Checked Out বই দেখতে পারবে (Admin/Librarian এর অনুমোদন ছাড়া Pending বইগুলো এখানে আসবে না)
+                query.status = { $in: ["Published", "Checked Out"] };
+
+                // রিকোয়ারমেন্ট: Searching বাই Name (বইয়ের নাম/টাইটেল দিয়ে সার্চ - Case Insensitive)
+                if (search) {
+                    query.title = { $regex: search, $options: 'i' };
+                }
+
+                // রিকোয়ারমেন্ট: Filtering বাই Category
+                if (category && category !== "All") {
+                    query.category = category;
+                }
+
+                // রিকোয়ারমেন্ট: Filtering বাই Delivery Fee Range
+                if (minFee || maxFee) {
+                    query.deliveryFee = {};
+                    if (minFee) query.deliveryFee.$gte = Number(minFee);
+                    if (maxFee) query.deliveryFee.$lte = Number(maxFee);
+                }
+
+                // রিকোয়ারমেন্ট: Filtering বাই Availability Status (Published = Available, Checked Out = Unavailable)
+                if (availability && availability !== "All") {
+                    query.status = availability;
+                }
+
+                // ২. সার্ভার-সাইড পেহিনেশন লজিক
+                const pageNumber = parseInt(page);
+                const limitNumber = parseInt(limit);
+                const skip = (pageNumber - 1) * limitNumber;
+
+                // ফিল্টার অনুযায়ী মোট কতটি বই আছে তা বের করা (যাতে ফ্রন্টএন্ডে টোটাল পেজ সংখ্যা দেখানো যায়)
+                const totalBooks = await booksCollection.countDocuments(query);
+
+                // ডাটাবেজ থেকে নির্দিষ্ট লিমিট এবং স্কিপ অনুযায়ী ডাটা তুলে আনা
+                const books = await booksCollection.find(query)
+                    .skip(skip)
+                    .limit(limitNumber)
+                    .toArray();
+
+                // ফ্রন্টএন্ডের সুবিধার জন্য মেটা-ডাটা সহ রেসপন্স পাঠানো
+                res.json({
+                    success: true,
+                    totalBooks,
+                    totalPages: Math.ceil(totalBooks / limitNumber),
+                    currentPage: pageNumber,
+                    data: books
+                });
+
             } catch (err) {
-                res.status(500).json({ error: "Failed to fetch books" });
+                res.status(500).json({ error: "Failed to fetch books or evaluate filters" });
             }
         });
 
