@@ -9,7 +9,6 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 dotenv.config();
 
 const uri = process.env.MONGODB_URI;
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -36,61 +35,71 @@ async function run() {
         await client.connect();
         const db = client.db("ReadHaus");
 
-        // Collections
+        // ================= COLLECTIONS =================
         const usersCollection = db.collection("users");
         const booksCollection = db.collection("books");
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
 
-        // ================= GET ALL BOOKS (WITH ADVANCED SEARCH, FILTER & PAGINATION) =================
+
+        // ================= 🚚 DELIVERIES COLLECTION (Payment & Order) =================
+
+        // ১. পোস্ট ডেলিভারি (পেমেন্ট সফল হলে)
+        app.post('/api/deliveries', async (req, res) => {
+            try {
+                const { status, userId, sessionId, userEmail, price, bookId, bookTitle } = req.body;
+                const isExites = await deliveriesCollection.findOne({ sessionId });
+                if (isExites) {
+                    return res.json({ mes: "already exites" });
+                }
+                await deliveriesCollection.insertOne({
+                    status: (status === "complete" || !status) ? "pending" : status,
+                    userEmail,
+                    userId,
+                    sessionId,
+                    price,
+                    bookId,
+                    bookTitle,
+                    createdAt: new Date()
+                });
+                res.json({ mes: 'Payments successfull' });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to process delivery" });
+            }
+        });
+
+
+        // ================= 📚 BOOKS COLLECTION (Search, Filter, CRUD) =================
+
+        // ১. সব বই গেট করা (অ্যাডভান্সড সার্চ, ফিল্টার এবং পেজিনেশন সহ)
         app.get("/api/books", async (req, res) => {
             try {
-                // ফ্রন্টএন্ড থেকে কুয়েরি প্যারামিটারগুলো রিসিভ করা হচ্ছে
                 const { search, category, minFee, maxFee, availability, page = 1, limit = 6 } = req.query;
-
-                // ১. ডাইনামিক কুয়েরি অবজেক্ট তৈরি
                 let query = {};
-
-                // 🚨 ফিক্স ১: আপনার ডাটাবেজের অবজেক্টের 'status' অনুযায়ী ছোট হাতের অক্ষরে ফিক্স করা হলো
                 query.status = { $in: ["available", "checked out"] };
 
-                // রিকোয়ারমেন্ট: Searching বাই Name (বইয়ের নাম/টাইটেল দিয়ে সার্চ - Case Insensitive)
                 if (search) {
                     query.title = { $regex: search, $options: 'i' };
                 }
-
-                // রিকোয়ারমেন্ট: Filtering বাই Category
                 if (category && category !== "All") {
                     query.category = category;
                 }
-
-                // রিকোয়ারমেন্ট: Filtering বাই Delivery Fee Range
                 if (minFee || maxFee) {
                     query.deliveryFee = {};
                     if (minFee) query.deliveryFee.$gte = Number(minFee);
                     if (maxFee) query.deliveryFee.$lte = Number(maxFee);
                 }
-
-                // রিকোয়ারমেন্ট: Filtering বাই Availability Status
                 if (availability && availability !== "All") {
-                    query.status = availability.toLowerCase(); // সেফটির জন্য ছোট হাতের অক্ষরে কনভার্ট করা হলো
+                    query.status = availability.toLowerCase();
                 }
 
-                // ২. সার্ভার-সাইড পেজিনেশন লজিক
                 const pageNumber = parseInt(page);
                 const limitNumber = parseInt(limit);
                 const skip = (pageNumber - 1) * limitNumber;
 
-                // ফিল্টার অনুযায়ী মোট কতটি বই আছে তা বের করা
                 const totalBooks = await booksCollection.countDocuments(query);
+                const books = await booksCollection.find(query).skip(skip).limit(limitNumber).toArray();
 
-                // ডাটাবেজ থেকে নির্দিষ্ট লিমিট এবং স্কিপ অনুযায়ী ডাটা তুলে আনা
-                const books = await booksCollection.find(query)
-                    .skip(skip)
-                    .limit(limitNumber)
-                    .toArray();
-
-                // ফ্রন্টএন্ডের সুবিধার জন্য মেটা-ডাটা সহ রেসপন্স পাঠানো
                 res.json({
                     success: true,
                     totalBooks,
@@ -98,34 +107,38 @@ async function run() {
                     currentPage: pageNumber,
                     data: books
                 });
-
             } catch (err) {
                 res.status(500).json({ error: "Failed to fetch books or evaluate filters" });
             }
         });
 
-        // ================= GET SINGLE BOOK (WITH REAL REVIEWS) =================
+        // ২. একটি নির্দিষ্ট বই গেট করা (রিভিউ এবং পারচেজ চেক সহ)
         app.get("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
+                const { email } = req.query;
 
-                // ১. নির্দিষ্ট বইটি ডাটাবেজ থেকে খোঁজা
-                const book = await booksCollection.findOne({
-                    _id: new ObjectId(id),
-                });
-
+                const book = await booksCollection.findOne({ _id: new ObjectId(id) });
                 if (!book) {
                     return res.status(404).json({ error: "Book not found" });
                 }
 
-                // 🚨 ফিক্স ২: রিভিউ কালেকশন থেকে এই বইয়ের আসল রিভিউগুলো তুলে এনে অবজেক্টে পুশ করা
-                const bookReviews = await reviewsCollection
-                    .find({ bookId: new ObjectId(id) })
-                    .sort({ dateAdded: -1 })
-                    .toArray();
+                let isPurchased = false;
+                if (email) {
+                    const purchaseCheck = await deliveriesCollection.findOne({
+                        bookId: new ObjectId(id),
+                        userEmail: email,
+                        status: "complete"
+                    });
+                    if (purchaseCheck) {
+                        isPurchased = true;
+                    }
+                }
 
-                // বইয়ের মূল ডাটার সাথে রিভিউর অ্যারে যুক্ত করে দেওয়া হলো
+                const bookReviews = await reviewsCollection.find({ bookId: new ObjectId(id) }).sort({ dateAdded: -1 }).toArray();
+
                 book.reviews = bookReviews;
+                book.isPurchased = isPurchased;
 
                 res.json(book);
             } catch (err) {
@@ -133,12 +146,11 @@ async function run() {
             }
         });
 
-        // ================= ADD BOOK =================
+        // ৩. নতুন বই যোগ করা (Add Book)
         app.post("/api/books", async (req, res) => {
             try {
                 const newBook = req.body;
                 const result = await booksCollection.insertOne(newBook);
-
                 res.json({
                     success: true,
                     message: "Book added successfully",
@@ -149,17 +161,12 @@ async function run() {
             }
         });
 
-        // ================= UPDATE BOOK =================
+        // ৪. বইয়ের ডাটা আপডেট করা (Update Book)
         app.put("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
                 const updateData = req.body;
-
-                const result = await booksCollection.updateOne(
-                    { _id: new ObjectId(id) },
-                    { $set: updateData }
-                );
-
+                const result = await booksCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
                 res.json({
                     success: true,
                     message: "Book updated successfully",
@@ -170,14 +177,11 @@ async function run() {
             }
         });
 
-        // ================= DELETE BOOK =================
+        // ৫. বই ডিলিট করা (Delete Book)
         app.delete("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
-                const result = await booksCollection.deleteOne({
-                    _id: new ObjectId(id),
-                });
-
+                const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
                 res.json({
                     success: true,
                     message: "Book deleted successfully",
@@ -188,12 +192,14 @@ async function run() {
             }
         });
 
-        // ================== Review Post ==============================
+
+        // ================= ⭐ REVIEWS COLLECTION (Review Post & Live Average) =================
+
+        // ১. নতুন রিভিউ পোস্ট করা (এবং অটোমেটিকভাবে বইয়ের এভারেজ রেটিং আপডেট করা)
         app.post("/api/reviews", async (req, res) => {
             try {
                 const { bookId, userName, userEmail, userImage, rating, reviewText } = req.body;
 
-                // নতুন রিভিউ অবজেক্ট
                 const newReview = {
                     bookId: new ObjectId(bookId),
                     userName,
@@ -204,10 +210,8 @@ async function run() {
                     dateAdded: new Date()
                 };
 
-                // ১. রিভিউ কালেকশনে ইনসার্ট করা
                 const reviewResult = await reviewsCollection.insertOne(newReview);
 
-                // ২. এই বইয়ের সব রিভিউ নিয়ে এভারেজ রেটিং এবং টোটাল রিভিউ হিসাব করা (Aggregation)
                 const stats = await reviewsCollection.aggregate([
                     { $match: { bookId: new ObjectId(bookId) } },
                     {
@@ -219,7 +223,6 @@ async function run() {
                     }
                 ]).toArray();
 
-                // ৩. বুক কালেকশনে গিয়ে ওই নির্দিষ্ট বইয়ের totalReviews এবং averageRating আপডেট করা
                 if (stats.length > 0) {
                     const { totalReviews, averageRating } = stats[0];
                     await booksCollection.updateOne(
@@ -234,26 +237,57 @@ async function run() {
                 }
 
                 res.json({ success: true, message: "Review added successfully!", reviewId: reviewResult.insertedId });
-
             } catch (err) {
                 res.status(500).json({ error: "Failed to add review", details: err.message });
             }
         });
 
-        // ২. GET: /api/reviews/:bookId
+        // ২. কোনো নির্দিষ্ট বইয়ের সব রিভিউ দেখা
         app.get("/api/reviews/:bookId", async (req, res) => {
             try {
                 const bookId = req.params.bookId;
-                const reviews = await reviewsCollection
-                    .find({ bookId: new ObjectId(bookId) })
-                    .sort({ dateAdded: -1 })
-                    .toArray();
-
+                const reviews = await reviewsCollection.find({ bookId: new ObjectId(bookId) }).sort({ dateAdded: -1 }).toArray();
                 res.json(reviews);
             } catch (err) {
                 res.status(500).json({ error: "Failed to fetch reviews" });
             }
         });
+
+
+        // ================= 📊 ADMIN DASHBOARD OVERVIEW DATA (রিয়েল ডাটাবেজ ক্যালকুলেশন) =================
+
+        // আপনার ড্যাশবোর্ডের ৪টি কার্ড ও ডোনাট চার্টের জন্য একদম রিয়েল-টাইম ডাটা এন্ডপয়েন্ট
+        app.get("/api/admin/dashboard-stats", async (req, res) => {
+            try {
+                // ১. ডাইনামিক কাউন্ট জেনারেট করা
+                const totalUsers = await usersCollection.countDocuments();
+                const totalBooks = await booksCollection.countDocuments();
+                const totalDeliveries = await deliveriesCollection.countDocuments({ status: "pending" }); // অথবা "complete" আপনার লজিক অনুযায়ী
+
+                // ২. টোটাল রাজস্ব (Revenue) হিসেব করা
+                const allDeliveries = await deliveriesCollection.find().toArray();
+                const totalRevenue = allDeliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+
+                // ৩. হাফ-পাই চার্টের জন্য ক্যাটাগরি ভিত্তিক বইয়ের পরিমাণ বের করা (MongoDB Aggregation)
+                const categoryStats = await booksCollection.aggregate([
+                    { $group: { _id: "$category", value: { $sum: 1 } } },
+                    { $project: { name: "$_id", value: 1, _id: 0 } }
+                ]).toArray();
+
+                // ৪. ফ্রন্টএন্ডের জন্য রেসপন্স পাঠানো
+                res.json({
+                    success: true,
+                    totalUsers,
+                    totalBooks,
+                    totalDeliveries,
+                    totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+                    chartData: categoryStats.length > 0 ? categoryStats : [{ name: "No Books", value: 0 }]
+                });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch dashboard live metrics" });
+            }
+        });
+
 
         console.log("MongoDB connected successfully!");
     } catch (err) {
