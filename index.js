@@ -40,6 +40,66 @@ async function run() {
         const booksCollection = db.collection("books");
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
+        const addBooksCollection = db.collection("add-books");
+
+
+
+        // ================== laibrarian add book ==================
+        app.post("/librarian/add-book", async (req, res) => {
+            const data = req.body;
+            const result = await addBooksCollection.insertOne(data);
+            res.json(result);
+
+        });
+
+
+        // ================= 👑 ADMIN BOOK APPROVALS API =================
+
+        // ১. শুধুমাত্র 'pending' (অনুমোদনহীন) বইগুলো এডমিন প্যানেলে দেখানোর জন্য গেট এপিআই
+        app.get("/api/admin/book-approvals", async (req, res) => {
+            try {
+                const pendingBooks = await booksCollection
+                    .find({ status: "pending" })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+                res.json(pendingBooks);
+            } catch (err) {
+                res.status(500).json({ error: "অনুমোদনহীন বইয়ের তালিকা আনতে ব্যর্থ হয়েছে" });
+            }
+        });
+
+        // ২. বই Approve করার এপিআই (স্ট্যাটাস 'available' হয়ে যাবে যেন ইউজাররা ব্রাউজ পেজে দেখতে পায়)
+        app.patch("/api/admin/book-approve/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const result = await booksCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: "available" } } // 'pending' থেকে 'available' এ পরিবর্তন
+                );
+
+                if (result.modifiedCount === 0) {
+                    return res.status(404).json({ error: "বইটি খুঁজে পাওয়া যায়নি বা ইতিমধ্যে অনুমোদিত" });
+                }
+                res.json({ success: true, message: "বইটি সফলভাবে অনুমোদন করা হয়েছে" });
+            } catch (err) {
+                res.status(500).json({ error: "বই অনুমোদন করতে সার্ভার সমস্যা হয়েছে" });
+            }
+        });
+
+        // ৩. বই রিজেক্ট বা ডাটাবেজ থেকে পুরোপুরি ডিলিট করার এপিআই
+        app.delete("/api/admin/book-reject/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ error: "বইটি খুঁজে পাওয়া যায়নি" });
+                }
+                res.json({ success: true, message: "বইটি ডাটাবেজ থেকে পুরোপুরি মুছে ফেলা হয়েছে" });
+            } catch (err) {
+                res.status(500).json({ error: "বইটি ডিলিট করতে সমস্যা হয়েছে" });
+            }
+        });
 
 
         // ================= 🚚 DELIVERIES COLLECTION (Payment & Order) =================
