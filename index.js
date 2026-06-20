@@ -40,15 +40,36 @@ async function run() {
         const booksCollection = db.collection("books");
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
-        const addBooksCollection = db.collection("add-books");
+        const addBooksCollection = db.collection("addbooks");
 
 
 
         // ================== laibrarian add book ==================
-        app.post("/librarian/add-book", async (req, res) => {
-            const data = req.body;
-            const result = await addBooksCollection.insertOne(data);
-            res.json(result);
+
+        app.post("/librarian/addbook", async (req, res) => {
+            try {
+                const bookData = req.body;
+                const librarianName = req.user.name;
+
+                const newBookDoc = {
+                    title: bookData.title,
+                    author: bookData.author,
+                    description: bookData.description,
+                    category: bookData.category,
+                    deliveryFee: parseFloat(bookData.deliveryFee),
+                    image: bookData.image || "default-link",
+                    librarian: librarianName, // 👈 স্বয়ংক্রিয়ভাবে বসে গেল
+                    status: "pending",
+                    createdAt: new Date()
+                };
+
+                const result = await addBooksCollection.insertOne(newBookDoc);
+                res.status(201).json({ success: true, result });
+            } catch (error) {
+                console.log('Main error', error);
+                res.status(500).json({ success: false });
+
+            }
 
         });
 
