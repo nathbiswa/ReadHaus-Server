@@ -5,6 +5,7 @@ const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 
 dotenv.config();
 
@@ -20,6 +21,37 @@ app.use(
 );
 
 app.use(express.json());
+app.use(cors());
+
+const JWKS = createRemoteJWKSet(
+    new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+)
+
+
+// verifyToken start
+const veriryToken = async (req, res, next) => {
+    const authHeader = req?.headers.authorization
+    if (!authHeader) {
+        return res.status(401).json({ message: "Unauthrization" })
+    }
+
+    console.log(authHeader)
+    const token = authHeader.split(' ')[1]
+    console.log(token)
+    if (!token) {
+        return res.status(401).json({ message: "Unauthorization" })
+    }
+
+    try {
+        const { payload } = await jwtVerify(token, JWKS)
+        console.log(payload)
+        next()
+    } catch (error) {
+        console.log(error)
+        return res.status(401).json({ message: "Unauthorizatiion" })
+    }
+}
+
 
 // Mongo Client
 const client = new MongoClient(uri, {
@@ -46,10 +78,10 @@ async function run() {
 
         // ================== laibrarian add book ==================
 
-        app.post("/librarian/addbook", async (req, res) => {
+        app.post("/librarian/addbook", veriryToken, async (req, res) => {
             try {
                 const bookData = req.body;
-                const librarianName = req.user.name;
+                const librarianName = bookData.librarian || "Unknown Librarian";
 
                 const newBookDoc = {
                     title: bookData.title,
