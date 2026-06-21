@@ -13,6 +13,7 @@ const uri = process.env.MONGODB_URI;
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// ✅ Only one strict CORS configuration
 app.use(
     cors({
         credentials: true,
@@ -21,37 +22,34 @@ app.use(
 );
 
 app.use(express.json());
-app.use(cors());
 
 const JWKS = createRemoteJWKSet(
     new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
-)
+);
 
-
-// verifyToken start
-const veriryToken = async (req, res, next) => {
-    const authHeader = req?.headers.authorization
+// ✅ Verified standard token validation middleware
+const verifyToken = async (req, res, next) => {
+    const authHeader = req?.headers.authorization;
     if (!authHeader) {
-        return res.status(401).json({ message: "Unauthrization" })
+        return res.status(401).json({ message: "Unauthorized" });
     }
 
-    console.log(authHeader)
-    const token = authHeader.split(' ')[1]
-    console.log(token)
+    console.log(authHeader);
+    const token = authHeader.split(' ')[1];
+    console.log(token);
     if (!token) {
-        return res.status(401).json({ message: "Unauthorization" })
+        return res.status(401).json({ message: "Unauthorized" });
     }
 
     try {
-        const { payload } = await jwtVerify(token, JWKS)
-        console.log(payload)
-        next()
+        const { payload } = await jwtVerify(token, JWKS);
+        console.log(payload);
+        next();
     } catch (error) {
-        console.log(error)
-        return res.status(401).json({ message: "Unauthorizatiion" })
+        console.log(error);
+        return res.status(401).json({ message: "Unauthorized" });
     }
-}
-
+};
 
 // Mongo Client
 const client = new MongoClient(uri, {
@@ -73,12 +71,94 @@ async function run() {
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
         const addBooksCollection = db.collection("addbooks");
+        const wishlistsCollection = db.collection("wishlists"); // ✅ Standardized collection name
+
+        // ================= ❤️ WISHLIST COLLECTION =================
+
+        // 1. Add a new book to wishlist (POST)
+        app.post("/api/wishlist", async (req, res) => {
+            try {
+                const wishlistData = req.body;
+
+                // Duplicate Check to prevent multiple entries of the same book
+                const isAlreadyAdded = await wishlistsCollection.findOne({
+                    userEmail: wishlistData.userEmail,
+                    bookId: wishlistData.bookId
+                });
+
+                if (isAlreadyAdded) {
+                    return res.status(400).json({ success: false, message: "This book is already in your wishlist!" });
+                }
+
+                // Insert into database
+                const result = await wishlistsCollection.insertOne({
+                    ...wishlistData,
+                    addedAt: new Date()
+                });
+
+                res.status(201).json({ success: true, message: "Book added to wishlist successfully!", result });
+            } catch (err) {
+                console.error("Wishlist POST error:", err);
+                res.status(500).json({ success: false, message: "Internal server error! Failed to add to wishlist." });
+            }
+        });
+
+        // 2. Fetch specific user's wishlist data (GET)
+        app.get("/api/wishlist", async (req, res) => {
+            try {
+                const email = req.query.email;
+
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "User email is required!" });
+                }
+
+                const result = await wishlistsCollection.find({ userEmail: email }).toArray();
+                res.status(200).json({ success: true, data: result });
+            } catch (err) {
+                console.error("Wishlist GET error:", err);
+                res.status(500).json({ success: false, message: "Failed to fetch wishlist data." });
+            }
+        });
 
 
+        // ================= 📊 USER DASHBOARD OVERVIEW DATA =================
 
-        // ================== laibrarian add book ==================
+        // 3. Fetch analytics data for the user overview dashboard screen (GET)
+        app.get("/api/user-summary", async (req, res) => {
+            try {
+                const email = req.query.email;
 
-        app.post("/librarian/addbook", veriryToken, async (req, res) => {
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "User email is required!" });
+                }
+
+                // Async aggregate tracking using the deliveries collection
+                const booksReadCount = await deliveriesCollection.countDocuments({ userEmail: email, status: "read" });
+                const pendingCount = await deliveriesCollection.countDocuments({ userEmail: email, status: "pending" });
+
+                // Fetching all spending events for this client
+                const userDeliveries = await deliveriesCollection.find({ userEmail: email }).toArray();
+                const totalSpent = userDeliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+
+                res.status(200).json({
+                    success: true,
+                    message: "User dashboard activities summary fetched successfully",
+                    data: {
+                        booksRead: booksReadCount || 0,
+                        pendingDeliveries: pendingCount || 0,
+                        totalSpent: parseFloat(totalSpent.toFixed(2))
+                    }
+                });
+            } catch (err) {
+                console.error("User summary GET error:", err);
+                res.status(500).json({ success: false, message: "Internal server error! Failed to fetch activity summary." });
+            }
+        });
+
+
+        // ================== librarian add book ==================
+
+        app.post("/librarian/addbook", verifyToken, async (req, res) => {
             try {
                 const bookData = req.body;
                 const librarianName = bookData.librarian || "Unknown Librarian";
@@ -90,7 +170,7 @@ async function run() {
                     category: bookData.category,
                     deliveryFee: parseFloat(bookData.deliveryFee),
                     image: bookData.image || "default-link",
-                    librarian: librarianName, // 👈 স্বয়ংক্রিয়ভাবে বসে গেল
+                    librarian: librarianName,
                     status: "pending",
                     createdAt: new Date()
                 };
@@ -100,15 +180,12 @@ async function run() {
             } catch (error) {
                 console.log('Main error', error);
                 res.status(500).json({ success: false });
-
             }
-
         });
 
 
         // ================= 👑 ADMIN BOOK APPROVALS API =================
 
-        // ১. শুধুমাত্র 'pending' (অনুমোদনহীন) বইগুলো এডমিন প্যানেলে দেখানোর জন্য গেট এপিআই
         app.get("/api/admin/book-approvals", async (req, res) => {
             try {
                 const pendingBooks = await booksCollection
@@ -117,53 +194,50 @@ async function run() {
                     .toArray();
                 res.json(pendingBooks);
             } catch (err) {
-                res.status(500).json({ error: "অনুমোদনহীন বইয়ের তালিকা আনতে ব্যর্থ হয়েছে" });
+                res.status(500).json({ error: "Failed to fetch pending books." });
             }
         });
 
-        // ২. বই Approve করার এপিআই (স্ট্যাটাস 'available' হয়ে যাবে যেন ইউজাররা ব্রাউজ পেজে দেখতে পায়)
         app.patch("/api/admin/book-approve/:id", async (req, res) => {
             try {
                 const id = req.params.id;
                 const result = await booksCollection.updateOne(
                     { _id: new ObjectId(id) },
-                    { $set: { status: "available" } } // 'pending' থেকে 'available' এ পরিবর্তন
+                    { $set: { status: "available" } }
                 );
 
                 if (result.modifiedCount === 0) {
-                    return res.status(404).json({ error: "বইটি খুঁজে পাওয়া যায়নি বা ইতিমধ্যে অনুমোদিত" });
+                    return res.status(404).json({ error: "Book not found or already approved." });
                 }
-                res.json({ success: true, message: "বইটি সফলভাবে অনুমোদন করা হয়েছে" });
+                res.json({ success: true, message: "Book approved successfully!" });
             } catch (err) {
-                res.status(500).json({ error: "বই অনুমোদন করতে সার্ভার সমস্যা হয়েছে" });
+                res.status(500).json({ error: "Server error during book approval." });
             }
         });
 
-        // ৩. বই রিজেক্ট বা ডাটাবেজ থেকে পুরোপুরি ডিলিট করার এপিআই
         app.delete("/api/admin/book-reject/:id", async (req, res) => {
             try {
                 const id = req.params.id;
                 const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
 
                 if (result.deletedCount === 0) {
-                    return res.status(404).json({ error: "বইটি খুঁজে পাওয়া যায়নি" });
+                    return res.status(404).json({ error: "Book not found." });
                 }
-                res.json({ success: true, message: "বইটি ডাটাবেজ থেকে পুরোপুরি মুছে ফেলা হয়েছে" });
+                res.json({ success: true, message: "Book rejected and deleted successfully." });
             } catch (err) {
-                res.status(500).json({ error: "বইটি ডিলিট করতে সমস্যা হয়েছে" });
+                res.status(500).json({ error: "Failed to delete the book." });
             }
         });
 
 
         // ================= 🚚 DELIVERIES COLLECTION (Payment & Order) =================
 
-        // ১. পোস্ট ডেলিভারি (পেমেন্ট সফল হলে)
         app.post('/api/deliveries', async (req, res) => {
             try {
                 const { status, userId, sessionId, userEmail, price, bookId, bookTitle } = req.body;
                 const isExites = await deliveriesCollection.findOne({ sessionId });
                 if (isExites) {
-                    return res.json({ mes: "already exites" });
+                    return res.json({ mes: "already exists" });
                 }
                 await deliveriesCollection.insertOne({
                     status: (status === "complete" || !status) ? "pending" : status,
@@ -175,7 +249,7 @@ async function run() {
                     bookTitle,
                     createdAt: new Date()
                 });
-                res.json({ mes: 'Payments successfull' });
+                res.json({ mes: 'Payment successful' });
             } catch (err) {
                 res.status(500).json({ error: "Failed to process delivery" });
             }
@@ -184,7 +258,6 @@ async function run() {
 
         // ================= 📚 BOOKS COLLECTION (Search, Filter, CRUD) =================
 
-        // ১. সব বই গেট করা (অ্যাডভান্সড সার্চ, ফিল্টার এবং পেজিনেশন সহ)
         app.get("/api/books", async (req, res) => {
             try {
                 const { search, category, minFee, maxFee, availability, page = 1, limit = 6 } = req.query;
@@ -225,7 +298,6 @@ async function run() {
             }
         });
 
-        // ২. একটি নির্দিষ্ট বই গেট করা (রিভিউ এবং পারচেজ চেক সহ)
         app.get("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -259,7 +331,6 @@ async function run() {
             }
         });
 
-        // ৩. নতুন বই যোগ করা (Add Book)
         app.post("/api/books", async (req, res) => {
             try {
                 const newBook = req.body;
@@ -274,7 +345,6 @@ async function run() {
             }
         });
 
-        // ৪. বইয়ের ডাটা আপডেট করা (Update Book)
         app.put("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -290,7 +360,6 @@ async function run() {
             }
         });
 
-        // ৫. বই ডিলিট করা (Delete Book)
         app.delete("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -306,9 +375,8 @@ async function run() {
         });
 
 
-        // ================= ⭐ REVIEWS COLLECTION (Review Post & Live Average) =================
+        // ================= ⭐ REVIEWS COLLECTION =================
 
-        // ১. নতুন রিভিউ পোস্ট করা (এবং অটোমেটিকভাবে বইয়ের এভারেজ রেটিং আপডেট করা)
         app.post("/api/reviews", async (req, res) => {
             try {
                 const { bookId, userName, userEmail, userImage, rating, reviewText } = req.body;
@@ -355,7 +423,6 @@ async function run() {
             }
         });
 
-        // ২. কোনো নির্দিষ্ট বইয়ের সব রিভিউ দেখা
         app.get("/api/reviews/:bookId", async (req, res) => {
             try {
                 const bookId = req.params.bookId;
@@ -365,42 +432,6 @@ async function run() {
                 res.status(500).json({ error: "Failed to fetch reviews" });
             }
         });
-
-
-        // ================= 📊 ADMIN DASHBOARD OVERVIEW DATA (রিয়েল ডাটাবেজ ক্যালকুলেশন) =================
-
-        // আপনার ড্যাশবোর্ডের ৪টি কার্ড ও ডোনাট চার্টের জন্য একদম রিয়েল-টাইম ডাটা এন্ডপয়েন্ট
-        app.get("/api/admin/dashboard-stats", async (req, res) => {
-            try {
-                // ১. ডাইনামিক কাউন্ট জেনারেট করা
-                const totalUsers = await usersCollection.countDocuments();
-                const totalBooks = await booksCollection.countDocuments();
-                const totalDeliveries = await deliveriesCollection.countDocuments({ status: "pending" }); // অথবা "complete" আপনার লজিক অনুযায়ী
-
-                // ২. টোটাল রাজস্ব (Revenue) হিসেব করা
-                const allDeliveries = await deliveriesCollection.find().toArray();
-                const totalRevenue = allDeliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
-
-                // ৩. হাফ-পাই চার্টের জন্য ক্যাটাগরি ভিত্তিক বইয়ের পরিমাণ বের করা (MongoDB Aggregation)
-                const categoryStats = await booksCollection.aggregate([
-                    { $group: { _id: "$category", value: { $sum: 1 } } },
-                    { $project: { name: "$_id", value: 1, _id: 0 } }
-                ]).toArray();
-
-                // ৪. ফ্রন্টএন্ডের জন্য রেসপন্স পাঠানো
-                res.json({
-                    success: true,
-                    totalUsers,
-                    totalBooks,
-                    totalDeliveries,
-                    totalRevenue: parseFloat(totalRevenue.toFixed(2)),
-                    chartData: categoryStats.length > 0 ? categoryStats : [{ name: "No Books", value: 0 }]
-                });
-            } catch (err) {
-                res.status(500).json({ error: "Failed to fetch dashboard live metrics" });
-            }
-        });
-
 
         console.log("MongoDB connected successfully!");
     } catch (err) {
