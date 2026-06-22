@@ -13,15 +13,9 @@ const uri = process.env.MONGODB_URI;
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ✅ Only one strict CORS configuration
-app.use(
-    cors({
-        credentials: true,
-        origin: [process.env.CLIENT_URL || "http://localhost:3000"],
-    })
-);
-
+app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // URL encoded ডেটা নিরাপদে পার্স করার জন্য
 
 const JWKS = createRemoteJWKSet(
     new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
@@ -118,7 +112,6 @@ async function run() {
             }
         });
 
-
         // ================= 📊 USER DASHBOARD OVERVIEW DATA =================
 
         app.get("/api/user-summary", async (req, res) => {
@@ -129,18 +122,39 @@ async function run() {
                     return res.status(400).json({ success: false, message: "User email is required!" });
                 }
 
-                const booksReadCount = await deliveriesCollection.countDocuments({ userEmail: email, status: "read" });
-                const pendingCount = await deliveriesCollection.countDocuments({ userEmail: email, status: "pending" });
-
+                // ১. ডাটাবেজ থেকে লগইন করা ইউজারের সব ডেলিভারি ডাটা আনা
                 const userDeliveries = await deliveriesCollection.find({ userEmail: email }).toArray();
-                const totalSpent = userDeliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
 
+                let booksReadCount = 0;
+                let pendingCount = 0;
+                let totalSpent = 0;
+
+                // ২. লুপ চালিয়ে মঙ্গোডিবির অবজেক্ট থেকে ডেটা কাউন্ট এবং ক্যালকুলেট করা
+                userDeliveries.forEach(item => {
+                    // স্ট্যাটাস ফিল্ডের টেক্সট ট্রিম ও লোয়ারকেস করা হলো যাতে স্পেস বা কেস-সেন্সিটিভ ইস্যু না হয়
+                    const currentStatus = (item.status || "").trim().toLowerCase();
+
+                    // Books Read কাউন্ট
+                    if (["complete", "read", "delivered", "completed"].includes(currentStatus)) {
+                        booksReadCount++;
+                    }
+                    // Pending Deliveries কাউন্ট
+                    else if (["pending", "processing", "ordered"].includes(currentStatus)) {
+                        pendingCount++;
+                    }
+
+                    // Total Spent হিসাব (স্ট্রিং "65" কে নাম্বারে রূপান্তর করা)
+                    const cost = Number(item.price) || 0;
+                    totalSpent += cost;
+                });
+
+                // ৩. ফ্রন্টঅ্যান্ডের নির্দিষ্ট প্যাটার্ন অনুযায়ী রেসপন্স পাঠানো
                 res.status(200).json({
                     success: true,
                     message: "User dashboard activities summary fetched successfully",
                     data: {
-                        booksRead: booksReadCount || 0,
-                        pendingDeliveries: pendingCount || 0,
+                        booksRead: booksReadCount,
+                        pendingDeliveries: pendingCount,
                         totalSpent: parseFloat(totalSpent.toFixed(2))
                     }
                 });
@@ -150,6 +164,33 @@ async function run() {
             }
         });
 
+
+        // ================= 🚚 USER DELIVERY HISTORY DATA =================
+
+        app.get("/api/user-deliveries", async (req, res) => {
+            try {
+                const email = req.query.email;
+
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "User email is required!" });
+                }
+
+                // ডাটাবেজ থেকে নির্দিষ্ট ইউজারের সব ডেলিভারি ডেটা লেটেস্ট ডেট অনুযায়ী খুঁজে বের করা
+                const result = await deliveriesCollection
+                    .find({ userEmail: email })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.status(200).json({
+                    success: true,
+                    message: "User deliveries fetched successfully",
+                    data: result
+                });
+            } catch (err) {
+                console.error("User deliveries GET error:", err);
+                res.status(500).json({ success: false, message: "Failed to fetch delivery history data." });
+            }
+        });
 
         // ================== LIBRARIAN ADD BOOK ==================
 
@@ -189,24 +230,48 @@ async function run() {
             }
         });
 
+        // ================= 👑 ADMIN TRANSACTIONS ROUTE (নতুন যোগ করুন) =================
+        app.get("/api/admin/transactions", async (req, res) => {
+            try {
+                // ডাটাবেজের সব ডেলিভারি/লেনদেন একেবারে লেটেস্ট ডেট অনুযায়ী নিয়ে আসা
+                const deliveries = await deliveriesCollection.find().sort({ createdAt: -1 }).toArray();
+
+                // ফ্রন্টএন্ড টেবিলের ফরম্যাটের সাথে মিলানোর জন্য ডেটা ম্যাপ করা
+                const formattedTransactions = deliveries.map(item => ({
+                    id: item._id,
+                    transactionId: item.sessionId || `TXN-${item._id.toString().substring(0, 10).toUpperCase()}`,
+                    userName: item.userName || "Regular User",
+                    userEmail: item.userEmail || "No Email",
+                    librarianName: item.librarianName || "Main Library",
+                    librarianEmail: item.librarianEmail || "library@readhaus.com",
+                    bookTitle: item.bookTitle || "Purchased Book",
+                    amount: Number(item.price) || 0, // ব্যাকএন্ডের price ফ্রন্টএন্ডে amount হিসেবে যাবে
+                    date: item.createdAt ? new Date(item.createdAt).toLocaleDateString('en-US', {
+                        month: 'short', day: 'numeric', year: 'numeric'
+                    }) : "Recent",
+                    status: item.status || "Pending"
+                }));
+
+                res.status(200).json({
+                    success: true,
+                    data: formattedTransactions
+                });
+            } catch (err) {
+                console.error("Fetch transactions error:", err);
+                res.status(500).json({ success: false, error: "লেনদেনের তালিকা লোড করতে ব্যর্থ হয়েছে।" });
+            }
+        });
         // ================= 📊 ADMIN DASHBOARD STATS ================= 
 
         app.get("/api/admin/dashboard-stats", async (req, res) => {
             try {
-                // ১. মোট ইউজার সংখ্যা
                 const totalUsers = await usersCollection.countDocuments();
-
-                // ২. মোট বইয়ের সংখ্যা
                 const totalBooks = await booksCollection.countDocuments();
-
-                // ৩. মোট ডেলিভারি সংখ্যা
                 const totalDeliveries = await deliveriesCollection.countDocuments();
 
-                // ৪. মোট রেভিনিউ (সব ডেলিভারির প্রাইস যোগফল)
                 const deliveries = await deliveriesCollection.find().toArray();
                 const totalRevenue = deliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
 
-                // ৫. চার্টের জন্য ডাটা (ক্যাটাগরি অনুযায়ী বইয়ের সংখ্যা)
                 const categoryData = await booksCollection.aggregate([
                     { $group: { _id: "$category", count: { $sum: 1 } } },
                     { $project: { name: "$_id", value: "$count", _id: 0 } }
@@ -270,7 +335,6 @@ async function run() {
             }
         });
 
-        // বইয়ের স্ট্যাটাস বা অন্যান্য তথ্য আপডেট করার জেনেরিক রুট
         app.patch("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -290,9 +354,8 @@ async function run() {
         });
 
 
-        // ================= 👑 ADMIN USER MANAGEMENT (নতুন যোগ করুন) =================
+        // ================= 👑 ADMIN USER MANAGEMENT =================
 
-        // সব ইউজার পাওয়ার জন্য
         app.get("/api/admin/users", async (req, res) => {
             try {
                 const users = await usersCollection.find().toArray();
@@ -302,7 +365,6 @@ async function run() {
             }
         });
 
-        // ইউজার ডিলিট করার জন্য
         app.delete("/api/admin/user/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -316,7 +378,6 @@ async function run() {
             }
         });
 
-        // ইউজারের রোল আপডেট করার জন্য
         app.patch("/api/admin/user-role/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -341,11 +402,7 @@ async function run() {
                     return res.status(400).json({ success: false, message: "Email is required" });
                 }
 
-                // ১. লাইব্রেরিয়ানের যুক্ত করা বইয়ের সংখ্যা
                 const totalBooks = await booksCollection.countDocuments({ librarianEmail: email });
-
-                // ২. লাইব্রেরিয়ানের বইগুলোর ওপর ভিত্তি করে ডেলিভারি হিস্ট্রি থেকে উপার্জন বের করা
-                // ধরুন লাইব্রেরিয়ানের বইগুলোর আইডি দিয়ে ডেলিভারি কালেকশনে সার্চ করতে হবে
                 const librarianBooks = await booksCollection.find({ librarianEmail: email }).toArray();
                 const bookIds = librarianBooks.map(book => book._id.toString());
 
@@ -356,13 +413,11 @@ async function run() {
 
                 const totalEarnings = deliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
 
-                // ৩. পেন্ডিং রিকোয়েস্ট (যেগুলো লাইব্রেরিয়ান যুক্ত করেছে কিন্তু এখনো পাবলিশ হয়নি)
                 const pendingRequests = await booksCollection.countDocuments({
                     librarianEmail: email,
                     status: "Pending Approval"
                 });
 
-                // ৪. চার্টের জন্য ক্যাটাগরি ডিস্ট্রিবিউশন
                 const categoryDistribution = await booksCollection.aggregate([
                     { $match: { librarianEmail: email } },
                     { $group: { _id: "$category", count: { $sum: 1 } } },
@@ -384,20 +439,18 @@ async function run() {
             }
         });
 
-        // ================= 🚚 DELIVERIES COLLECTION (Payment & Order - FIXED 🛠️) =================
+        // ================= 🚚 DELIVERIES COLLECTION =================
 
-        // ১. ডাটা ইনসার্ট করার রুট
         app.post('/api/deliveries', async (req, res) => {
             const data = req.body;
             await deliveriesCollection.insertOne({ ...data, createdAt: new Date() });
             res.json({ success: true });
         });
 
-        // ২. ডাটা আপডেট করার রুট (সাকসেস পেজের জন্য)
         app.patch('/api/deliveries/update-status', async (req, res) => {
             const { sessionId, status } = req.body;
             const result = await deliveriesCollection.updateOne(
-                { sessionId: sessionId }, // 👈 এখানে আইডি মিলতে হবে
+                { sessionId: sessionId },
                 { $set: { status: status } }
             );
             res.json({ success: true, modifiedCount: result.modifiedCount });
@@ -411,7 +464,7 @@ async function run() {
                 const { search, category, minFee, maxFee, availability, page = 1, limit = 10 } = req.query;
                 let query = {};
 
-                query.status = "Published";
+                query.status = "Published"; // ডিফল্টভাবে শুধুমাত্র অ্যাপ্রুভড বই দেখাবে
 
                 if (search) {
                     query.title = { $regex: search, $options: 'i' };
@@ -451,7 +504,6 @@ async function run() {
             }
         });
 
-        // 💡 ফিক্স ৩: সিঙ্গেল বুক ডিটেইলসে bookId-এর টাইপ ফিক্স করা হলো (String কন্ডিশন)
         app.get("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -465,7 +517,7 @@ async function run() {
                 let isPurchased = false;
                 if (email) {
                     const purchaseCheck = await deliveriesCollection.findOne({
-                        bookId: id, // ডাটাবেজের স্ট্রিং ফরমেটের সাথে মিলানো হলো
+                        bookId: id,
                         userEmail: email,
                         status: "complete"
                     });
@@ -529,13 +581,12 @@ async function run() {
         });
 
 
-        // ================= ⭐ REVIEWS COLLECTION (FIXED 🛠️) =================
+        // ================= ⭐ REVIEWS COLLECTION =================
 
         app.post("/api/reviews", async (req, res) => {
             try {
                 const { bookId, userName, userEmail, userImage, rating, reviewText } = req.body;
 
-                // 💡 ফিক্স ৪: রিভিউ দেওয়ার সময় deliveries কালেকশনে bookId স্ট্রিং হিসেবে চেক করা হলো
                 const hasReceivedBook = await deliveriesCollection.findOne({
                     bookId: bookId,
                     userEmail: userEmail,
@@ -601,18 +652,20 @@ async function run() {
             }
         });
 
+        // 🚀 ডেটাবেজ কানেক্ট হওয়ার পর এখন সার্ভার লিসেন করবে নিরাপদে!
         console.log("MongoDB connected successfully!");
+
+        app.get("/", (req, res) => {
+            res.send("Server is running fine!");
+        });
+
+        app.listen(PORT, () => {
+            console.log(`Server running on port ${PORT}`);
+        });
+
     } catch (err) {
         console.error("MongoDB connection error:", err);
     }
 }
 
 run().catch(console.dir);
-
-app.get("/", (req, res) => {
-    res.send("Server is running fine!");
-});
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
