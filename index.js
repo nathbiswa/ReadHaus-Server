@@ -192,6 +192,51 @@ async function run() {
             }
         });
 
+
+        // ================= ⭐ USER REVIEWS API ROUTES =================
+
+        // ১. নির্দিষ্ট ইউজারের রিভিউ লিস্ট পাওয়ার রুট
+        app.get("/api/user-reviews", async (req, res) => {
+            try {
+                const email = req.query.email;
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "User email is required!" });
+                }
+
+                const result = await reviewsCollection
+                    .find({ userEmail: email })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.status(200).json({ success: true, data: result });
+            } catch (err) {
+                console.error("User reviews GET error:", err);
+                res.status(500).json({ success: false, message: "Failed to load user reviews." });
+            }
+        });
+
+        // ২. নির্দিষ্ট রিভিউ ডিলিট করার রুট
+        app.delete("/api/reviews/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                // MongoDB ObjectId ভ্যালিডেশন এবং ফরম্যাটিং
+                const { ObjectId } = require('mongodb');
+                const query = { _id: new ObjectId(id) };
+
+                const result = await reviewsCollection.deleteOne(query);
+
+                if (result.deletedCount === 1) {
+                    res.status(200).json({ success: true, message: "Review deleted successfully!" });
+                } else {
+                    res.status(404).json({ success: false, message: "Review not found!" });
+                }
+            } catch (err) {
+                console.error("Review DELETE error:", err);
+                res.status(500).json({ success: false, message: "Server error while deleting review." });
+            }
+        });
+
         // ================== LIBRARIAN ADD BOOK ==================
 
         app.post("/librarian/addbook", verifyToken, async (req, res) => {
