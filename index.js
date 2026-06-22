@@ -66,7 +66,7 @@ async function run() {
         const db = client.db("ReadHaus");
 
         // ================= COLLECTIONS =================
-        const usersCollection = db.collection("users");
+        const usersCollection = db.collection("user");
         const booksCollection = db.collection("books");
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
@@ -189,6 +189,41 @@ async function run() {
             }
         });
 
+        // ================= 📊 ADMIN DASHBOARD STATS ================= 
+
+        app.get("/api/admin/dashboard-stats", async (req, res) => {
+            try {
+                // ১. মোট ইউজার সংখ্যা
+                const totalUsers = await usersCollection.countDocuments();
+
+                // ২. মোট বইয়ের সংখ্যা
+                const totalBooks = await booksCollection.countDocuments();
+
+                // ৩. মোট ডেলিভারি সংখ্যা
+                const totalDeliveries = await deliveriesCollection.countDocuments();
+
+                // ৪. মোট রেভিনিউ (সব ডেলিভারির প্রাইস যোগফল)
+                const deliveries = await deliveriesCollection.find().toArray();
+                const totalRevenue = deliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+
+                // ৫. চার্টের জন্য ডাটা (ক্যাটাগরি অনুযায়ী বইয়ের সংখ্যা)
+                const categoryData = await booksCollection.aggregate([
+                    { $group: { _id: "$category", count: { $sum: 1 } } },
+                    { $project: { name: "$_id", value: "$count", _id: 0 } }
+                ]).toArray();
+
+                res.status(200).json({
+                    totalUsers,
+                    totalBooks,
+                    totalDeliveries,
+                    totalRevenue: totalRevenue.toFixed(2),
+                    chartData: categoryData
+                });
+            } catch (err) {
+                console.error("Dashboard stats error:", err);
+                res.status(500).json({ error: "Failed to fetch dashboard stats" });
+            }
+        });
 
         // ================= 👑 ADMIN BOOK APPROVALS API =================
 
