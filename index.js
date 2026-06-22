@@ -270,6 +270,119 @@ async function run() {
             }
         });
 
+        // বইয়ের স্ট্যাটাস বা অন্যান্য তথ্য আপডেট করার জেনেরিক রুট
+        app.patch("/api/books/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const updateData = req.body;
+                const result = await booksCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateData }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ error: "Book not found" });
+                }
+                res.json({ success: true, message: "Book updated successfully" });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to update book" });
+            }
+        });
+
+
+        // ================= 👑 ADMIN USER MANAGEMENT (নতুন যোগ করুন) =================
+
+        // সব ইউজার পাওয়ার জন্য
+        app.get("/api/admin/users", async (req, res) => {
+            try {
+                const users = await usersCollection.find().toArray();
+                res.status(200).json(users);
+            } catch (err) {
+                res.status(500).json({ error: "Failed to fetch users" });
+            }
+        });
+
+        // ইউজার ডিলিট করার জন্য
+        app.delete("/api/admin/user/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ error: "User not found" });
+                }
+                res.json({ success: true, message: "User deleted successfully" });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to delete user" });
+            }
+        });
+
+        // ইউজারের রোল আপডেট করার জন্য
+        app.patch("/api/admin/user-role/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { role } = req.body;
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { role: role } }
+                );
+                res.json({ success: true, message: "Role updated" });
+            } catch (err) {
+                res.status(500).json({ error: "Failed to update role" });
+            }
+        });
+
+
+        // ================= 📚 LIBRARIAN OVERVIEW STATS API =================
+        app.get("/api/librarian-stats", async (req, res) => {
+            try {
+                const { email } = req.query;
+
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "Email is required" });
+                }
+
+                // ১. লাইব্রেরিয়ানের যুক্ত করা বইয়ের সংখ্যা
+                const totalBooks = await booksCollection.countDocuments({ librarianEmail: email });
+
+                // ২. লাইব্রেরিয়ানের বইগুলোর ওপর ভিত্তি করে ডেলিভারি হিস্ট্রি থেকে উপার্জন বের করা
+                // ধরুন লাইব্রেরিয়ানের বইগুলোর আইডি দিয়ে ডেলিভারি কালেকশনে সার্চ করতে হবে
+                const librarianBooks = await booksCollection.find({ librarianEmail: email }).toArray();
+                const bookIds = librarianBooks.map(book => book._id.toString());
+
+                const deliveries = await deliveriesCollection.find({
+                    bookId: { $in: bookIds },
+                    status: "complete"
+                }).toArray();
+
+                const totalEarnings = deliveries.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+
+                // ৩. পেন্ডিং রিকোয়েস্ট (যেগুলো লাইব্রেরিয়ান যুক্ত করেছে কিন্তু এখনো পাবলিশ হয়নি)
+                const pendingRequests = await booksCollection.countDocuments({
+                    librarianEmail: email,
+                    status: "Pending Approval"
+                });
+
+                // ৪. চার্টের জন্য ক্যাটাগরি ডিস্ট্রিবিউশন
+                const categoryDistribution = await booksCollection.aggregate([
+                    { $match: { librarianEmail: email } },
+                    { $group: { _id: "$category", count: { $sum: 1 } } },
+                    { $project: { name: "$_id", value: "$count", _id: 0 } }
+                ]).toArray();
+
+                res.status(200).json({
+                    success: true,
+                    data: {
+                        totalBooks,
+                        totalEarnings: parseFloat(totalEarnings.toFixed(2)),
+                        pendingRequests,
+                        categoryDistribution: categoryDistribution.length > 0 ? categoryDistribution : []
+                    }
+                });
+            } catch (err) {
+                console.error("Librarian stats error:", err);
+                res.status(500).json({ success: false, message: "Failed to fetch librarian stats" });
+            }
+        });
 
         // ================= 🚚 DELIVERIES COLLECTION (Payment & Order - FIXED 🛠️) =================
 
@@ -295,7 +408,7 @@ async function run() {
 
         app.get("/api/books", async (req, res) => {
             try {
-                const { search, category, minFee, maxFee, availability, page = 1, limit = 6 } = req.query;
+                const { search, category, minFee, maxFee, availability, page = 1, limit = 10 } = req.query;
                 let query = {};
 
                 query.status = "Published";
