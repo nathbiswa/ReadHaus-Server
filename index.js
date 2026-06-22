@@ -237,6 +237,93 @@ async function run() {
             }
         });
 
+
+        // ================= ❤️ USER WISHLIST API ROUTES =================
+
+        // ১. নির্দিষ্ট ইউজারের উইশলিস্টের সব বই পাওয়ার রুট
+        app.get("/api/user-wishlist", async (req, res) => {
+            try {
+                const email = req.query.email;
+                if (!email) {
+                    return res.status(400).json({ success: false, message: "User email is required!" });
+                }
+
+                // 🚀 আপনার প্রোভাইড করা কালেকশনের সঠিক নাম ব্যবহার করা হলো
+                const result = await wishlistsCollection
+                    .find({ userEmail: email })
+                    .sort({ createdAt: -1 }) // লেটেস্ট অ্যাড হওয়া বই আগে দেখাবে
+                    .toArray();
+
+                res.status(200).json({
+                    success: true,
+                    message: "Wishlist fetched successfully",
+                    data: result
+                });
+            } catch (err) {
+                console.error("User wishlist GET error:", err);
+                res.status(500).json({ success: false, message: "Failed to load wishlist items." });
+            }
+        });
+
+        // ================= ❤️ ADD TO WISHLIST POST API =================
+        app.post("/api/wishlist", async (req, res) => {
+            try {
+                const wishlistData = req.body;
+
+                // ১. প্রয়োজনীয় ডেটা রিসিভ হয়েছে কিনা ভ্যালিডেশন করা
+                if (!wishlistData.userEmail || !wishlistData.bookId) {
+                    return res.status(400).json({ success: false, message: "Missing required fields!" });
+                }
+
+                // ২. একই বই এই ইউজার অলরেডি উইশলিস্টে রেখেছে কিনা চেক করা
+                const isExist = await wishlistsCollection.findOne({
+                    userEmail: wishlistData.userEmail,
+                    bookId: wishlistData.bookId
+                });
+
+                if (isExist) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "This book is already in your wishlist!"
+                    });
+                }
+
+                // ৩. নতুন উইশলিস্ট আইটেম ডাটাবেজে ইনসার্ট করা
+                const result = await wishlistsCollection.insertOne(wishlistData);
+
+                res.status(201).json({
+                    success: true,
+                    message: "Book added to wishlist successfully!",
+                    insertedId: result.insertedId
+                });
+
+            } catch (err) {
+                console.error("Wishlist POST error:", err);
+                res.status(500).json({ success: false, message: "Internal server error." });
+            }
+        });
+
+        // ২. উইশলিস্ট থেকে নির্দিষ্ট আইটেম ডিলিট করার রুট
+        app.delete("/api/wishlist/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { ObjectId } = require('mongodb');
+
+                // 🚀 ডিলিট অপারেশনেও সঠিক কালেকশন ভ্যারিয়েবল ম্যাপ করা হলো
+                const query = { _id: new ObjectId(id) };
+                const result = await wishlistsCollection.deleteOne(query);
+
+                if (result.deletedCount === 1) {
+                    res.status(200).json({ success: true, message: "Removed from wishlist successfully!" });
+                } else {
+                    res.status(404).json({ success: false, message: "Item not found in wishlist!" });
+                }
+            } catch (err) {
+                console.error("Wishlist item DELETE error:", err);
+                res.status(500).json({ success: false, message: "Server error while removing from wishlist." });
+            }
+        });
+
         // ================== LIBRARIAN ADD BOOK ==================
 
         app.post("/librarian/addbook", verifyToken, async (req, res) => {
