@@ -10,12 +10,21 @@ const uri = process.env.MONGODB_URI;
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// ✅ CORS ফিক্স: নির্দিষ্ট অরিজিন এবং ক্রেডেন্সিয়াল অ্যালাউ করা হলো
+app.use(
+    cors({
+        origin: "http://localhost:3000", // আপনার ফ্রন্টএন্ডের URL
+        credentials: true,               // সেশন/কুকি/ক্রেডেন্সিয়াল অ্যালাউ করার জন্য
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+    })
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const JWKS = createRemoteJWKSet(
-    new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+    new URL(`${process.env.CLIENT_URL || "http://localhost:3000"}/api/auth/jwks`)
 );
 
 // ✅ Verified standard token validation middleware
@@ -24,18 +33,16 @@ const verifyToken = async (req, res, next) => {
     if (!authHeader) {
         return res.status(401).json({ message: "Unauthorized" });
     }
-
     const token = authHeader.split(' ')[1];
     if (!token) {
         return res.status(401).json({ message: "Unauthorized" });
     }
-
     try {
         const { payload } = await jwtVerify(token, JWKS);
         req.decoded = payload;
         next();
-    } catch (error) {
-        console.log(error);
+    } catch (err) {
+        console.error("JWT verification error:", err);
         return res.status(401).json({ message: "Unauthorized" });
     }
 };
@@ -63,6 +70,47 @@ async function run() {
         const reviewsCollection = db.collection("reviews");
         const deliveriesCollection = db.collection("deliveries");
         const wishlistsCollection = db.collection("wishlists");
+
+        // ================= 💳 NEW: PAYMENTS & DELIVERY REQUEST API (FIXED) =================
+
+        // 🌟 ফ্রন্টএন্ডের ৪MD এরর ফিক্স করতে এই রাউটটি যুক্ত করা হলো
+        app.post("/api/payments", async (req, res) => {
+            try {
+                const { bookId, title, userEmail, userName, price, status } = req.body;
+
+                if (!userEmail || !bookId) {
+                    return res.status(400).json({ success: false, message: "Missing required tracking info!" });
+                }
+
+                // ১. আপনার deliveries কালেকশনে ডাটা "Pending" হিসেবে ইনিশিয়ালি সেভ হবে
+                const newDeliveryDoc = {
+                    bookId: bookId,
+                    bookTitle: title, // আপনার ওল্ড স্কিমার সাথে মিল রাখার জন্য
+                    userEmail: userEmail,
+                    userName: userName,
+                    price: Number(price) || 0,
+                    status: "Pending", // 👈 ইনিশিয়াল স্ট্যাটাস Pending
+                    createdAt: new Date(),
+                    sessionId: `TXN-${Date.now()}` // আপাতত লোকাল ট্র্যাকিং এর জন্য একটি ইউনিক আইডি জেনারেট করা হলো
+                };
+
+                const result = await deliveriesCollection.insertOne(newDeliveryDoc);
+
+                // ২. এখানে ভবিষ্যতে স্ট্রাইপ বা SSLCommerz ইন্টিগ্রেট করলে `url` রেসপন্স পাঠাবেন।
+                // আপাতত এটি সরাসরি সাকসেসফুল রেসপন্স রিটার্ন করবে যাতে ফ্রন্টএন্ডের টোস্ট কাজ করে।
+                res.status(201).json({
+                    success: true,
+                    message: "Delivery request submitted as Pending!",
+                    insertedId: result.insertedId
+                    // url: "https://checkout.stripe.com/..." // গেটওয়ে অ্যাড করলে এখানে জাস্ট লিংকটি অন করে দেবেন
+                });
+
+            } catch (err) {
+                console.error("Payment API error:", err);
+                res.status(500).json({ success: false, message: "Internal server error during payment request." });
+            }
+        });
+
 
         // ================= 📚 LIBRARIAN INVENTORY & MANAGE API =================
 
@@ -328,9 +376,7 @@ async function run() {
             }
         });
 
-
-
-        // ================= 👑 ADMIN/PUBLIC BOOK UPDATE ROUTE (ADDED TO FIX 404) =================
+        // ================= 👑 ADMIN/PUBLIC BOOK UPDATE ROUTE =================
         app.patch("/api/books/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -340,7 +386,6 @@ async function run() {
                     return res.status(400).json({ success: false, message: "Invalid Book ID format" });
                 }
 
-                // মঙ্গোডিবি ক্র্যাশ এড়াতে বডি থেকে _id ফিল্ডটি বাদ দেওয়া হলো
                 delete updateData._id;
 
                 const query = { _id: new ObjectId(id) };
@@ -351,7 +396,6 @@ async function run() {
                     }
                 };
 
-                // ওয়ান-ক্লিকে দুটি কালেকশনই আপডেট হবে যাতে ডাটা সিঙ্ক থাকে
                 const resultBooks = await booksCollection.updateOne(query, updateDoc);
                 const resultAddBooks = await addBooksCollection.updateOne(query, updateDoc);
 
@@ -442,7 +486,6 @@ async function run() {
                     approvedAt: new Date()
                 };
 
-                // ID ডুপ্লিকেশন এরর এড়াতে ইনসার্ট করার আগে ডিলিট করা হলো
                 delete approvedBookDoc._id;
 
                 await booksCollection.updateOne(
@@ -555,10 +598,13 @@ async function run() {
 
         // ================= 🚚 MANAGE DELIVERIES API =================
 
-        app.get("/api/librarian/deliveries", async (req, res) => {
+        app.get("/api/librarian/deliveries", verifyToken, async (req, res) => {
             try {
                 const { email } = req.query;
-                if (!email) return res.status(400).json({ success: false, message: "Librarian email is required" });
+
+                if (!email || req.decoded?.email !== email) {
+                    return res.status(403).json({ success: false, message: "Access denied! Invalid user context." });
+                }
 
                 const myBooks = await addBooksCollection.find({ librarianEmail: email }).toArray();
                 const myBookIds = myBooks.map(b => b._id.toString());
@@ -569,45 +615,70 @@ async function run() {
                     id: order._id,
                     sessionId: order.sessionId,
                     clientName: order.userName || "Regular Client",
+                    clientEmail: order.userEmail || "",
                     bookTitle: order.bookTitle || "Untitled Book",
-                    date: order.createdAt ? new Date(order.createdAt).toLocaleDateString() : "N/A",
+                    date: order.createdAt ? order.createdAt : null,
                     status: order.status || "Pending"
                 }));
 
-                res.status(200).json({ success: true, data: formattedOrders });
+                res.status(200).json({
+                    success: true,
+                    deliveries: formattedOrders,
+                    data: formattedOrders
+                });
             } catch (err) {
+                console.error("Fetch deliveries error:", err);
                 res.status(500).json({ success: false, message: "Failed to fetch delivery logs." });
             }
         });
 
-        app.patch('/api/librarian/deliveries/update-status', verifyToken, async (req, res) => {
+        app.patch('/api/librarian/deliveries/:id', verifyToken, async (req, res) => {
             try {
-                const { id, status } = req.body;
+                const id = req.params.id;
+                const { status } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ success: false, message: "Invalid Delivery ID format" });
+                }
+
                 if (!["Pending", "Dispatched", "Delivered"].includes(status)) {
                     return res.status(400).json({ success: false, message: "Invalid status state!" });
                 }
 
+                const targetOrder = await deliveriesCollection.findOne({ _id: new ObjectId(id) });
+                if (!targetOrder) {
+                    return res.status(404).json({ success: false, message: "Delivery order not found." });
+                }
+
+                const bookOfOrder = await addBooksCollection.findOne({ _id: new ObjectId(targetOrder.bookId) });
+                if (!bookOfOrder || bookOfOrder.librarianEmail !== req.decoded?.email) {
+                    return res.status(403).json({ success: false, message: "You are not authorized to update this delivery." });
+                }
+
                 const result = await deliveriesCollection.updateOne(
                     { _id: new ObjectId(id) },
-                    { $set: { status: status } }
+                    { $set: { status: status, updatedAt: new Date() } }
                 );
 
-                res.json({ success: true, message: `Delivery status updated to ${status}`, modifiedCount: result.modifiedCount });
+                res.status(200).json({
+                    success: true,
+                    message: `Delivery status updated to ${status}`,
+                    modifiedCount: result.modifiedCount
+                });
             } catch (err) {
+                console.error("Delivery status update error:", err);
                 res.status(500).json({ success: false, message: "Server error during status shift." });
             }
         });
 
         // ================= PUBLIC DELIVERIES ROUTE =================
-        // ================= PUBLIC DELIVERIES ROUTE (FIXED STATUS FOR PENDING) =================
         app.post('/api/deliveries', async (req, res) => {
             try {
                 const data = req.body;
 
-                // 🛠️ ফিক্স: নতুন অর্ডার তৈরি হওয়ার সময় স্ট্যাটাস ডিফল্টভাবে "Pending" থাকবে
                 const newDelivery = {
                     ...data,
-                    status: "Pending", // লিব্রারিয়ান এপ্রুভ করার আগে এটি Pending দেখাবে
+                    status: "Pending",
                     createdAt: new Date()
                 };
 
@@ -625,15 +696,13 @@ async function run() {
             res.json({ success: true, modifiedCount: result.modifiedCount });
         });
 
-        // ================= 📚 PUBLIC BROWSE BOOKS API (FIXED ALL FILTERS) =================
+        // ================= 📚 PUBLIC BROWSE BOOKS API =================
         app.get("/api/books", async (req, res) => {
             try {
                 const { search, category, availability, maxFee, page = 1, limit = 6 } = req.query;
 
-                // ১. ডিফল্ট কুয়েরি (শুধুমাত্র Published বই সাধারণ ইউজাররা দেখবে)
                 let query = { status: "Published" };
 
-                // ২. সার্চ ফিল্টার
                 if (search && search.trim() !== "") {
                     query.$or = [
                         { title: { $regex: search, $options: "i" } },
@@ -641,23 +710,19 @@ async function run() {
                     ];
                 }
 
-                // ৩. ক্যাটাগরি ফিল্টার (🛠️ ফিক্স: 'All' ভ্যালু সফলভাবে হ্যান্ডেল করা হয়েছে)
                 if (category && category !== "All") {
                     const cleanCategory = category.split(" ")[0];
                     query.category = { $regex: cleanCategory, $options: "i" };
                 }
 
-                // ৪. স্ট্যাটাস/অ্যাভেইলেবিলিটি ফিল্টার (🛠️ ফিক্স: 'All' ভ্যালু সফলভাবে হ্যান্ডেল করা হয়েছে)
                 if (availability && availability !== "All") {
                     query.status = availability;
                 }
 
-                // ৫. ডেলিভারি ফি ফিল্টার
                 if (maxFee) {
                     query.deliveryFee = { $lte: parseFloat(maxFee) };
                 }
 
-                // ৬. পেজিনেশন লজিক
                 const pageNumber = parseInt(page);
                 const limitNumber = parseInt(limit);
                 const skip = (pageNumber - 1) * limitNumber;
@@ -698,26 +763,24 @@ async function run() {
                 }
 
                 const bookReviews = await reviewsCollection.find({ bookId: new ObjectId(id) }).sort({ dateAdded: -1 }).toArray();
-                book.reviews = bookReviews;
-                book.isPurchased = isPurchased;
 
-                res.json(book);
+                res.status(200).json({ ...book, isPurchased, reviews: bookReviews });
             } catch (err) {
-                res.status(500).json({ error: "Invalid ID or server error" });
+                res.status(500).json({ error: "Failed to load book detailed context." });
             }
         });
 
     } finally {
-        // client.close(); 
+        // ডাটাকানেকশন ওপেনই থাকবে
     }
 }
+
 run().catch(console.dir);
 
-// Root Route
 app.get("/", (req, res) => {
-    res.send("ReadHaus Server is Running!");
+    res.send("ReadHaus Backend Server is Running Running... 🚀");
 });
 
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server connected on port: ${PORT}`);
 });
