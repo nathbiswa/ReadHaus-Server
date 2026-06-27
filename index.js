@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 5000;
 // ✅ CORS ফিক্স: নির্দিষ্ট অরিজিন এবং ক্রেডেন্সিয়াল অ্যালাউ করা হলো
 app.use(
     cors({
-        origin: "http://localhost:3000", // আপনার ফ্রন্টএন্ডের URL
+        origin: ["https://read-haus-client.vercel.app", "http://localhost:3000"], // আপনার ফ্রন্টএন্ডের URL
         credentials: true,               // সেশন/কুকি/ক্রেডেন্সিয়াল অ্যালাউ করার জন্য
         methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allowedHeaders: ["Content-Type", "Authorization"],
@@ -58,7 +58,7 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
         console.log("MongoDB connected successfully! ✅");
 
         const db = client.db("ReadHaus");
