@@ -677,8 +677,11 @@ async function run() {
 
                 const totalBooksListed = await addBooksCollection.countDocuments({ librarianEmail: email });
                 const librarianBooks = await addBooksCollection.find({ librarianEmail: email }).toArray();
-                const bookIds = librarianBooks.map(book => book._id.toString());
 
+                // ⚡ পরিবর্তন ১: আইডিগুলোকে MongoDB-র আসল ObjectId ফরম্যাটে রূপান্তর করুন
+                const bookIds = librarianBooks.map(book => new ObjectId(book._id));
+
+                // এখন আইডিগুলো সুন্দরভাবে ম্যাচ করবে 🟢
                 const deliveries = await deliveriesCollection.find({ bookId: { $in: bookIds }, status: "Delivered" }).toArray();
                 const totalEarnings = deliveries.reduce((sum, item) => sum + (Number(item.price || item.deliveryFee) || 0), 0);
 
@@ -709,6 +712,7 @@ async function run() {
                     }
                 });
             } catch (err) {
+                console.error("Librarian stats API error:", err); // এরর লগ ট্র্যাকিংয়ের জন্য
                 res.status(500).json({ success: false, message: "Failed to fetch librarian stats" });
             }
         });
@@ -779,36 +783,51 @@ async function run() {
                     return res.status(400).json({ success: false, message: "Invalid Delivery ID format" });
                 }
 
+                // ফ্রন্টএন্ড থেকে বড় হাতের বা ছোট হাতের যেভাবে আসুক, সব ছোট হাতের অক্ষরে রূপান্তর
                 const lowerStatus = status?.toLowerCase();
                 if (!["pending", "dispatched", "delivered"].includes(lowerStatus)) {
                     return res.status(400).json({ success: false, message: "Invalid status state!" });
                 }
 
+                // ডেলিভারি অর্ডারটি খুঁজে বের করা
                 const targetOrder = await deliveriesCollection.findOne({ _id: new ObjectId(id) });
                 if (!targetOrder) {
                     return res.status(404).json({ success: false, message: "Delivery order not found." });
                 }
 
-                const bookQuery = ObjectId.isValid(targetOrder.bookId)
-                    ? { _id: new ObjectId(targetOrder.bookId) }
-                    : { _id: targetOrder.bookId };
+                // 🟢 সিকিউরিটি চেক: ডাটাবেজে librarianEmail থাকলে সরাসরি চেক করা, না থাকলে বইয়ের আইডি দিয়ে চেক করা
+                const requesterEmail = req.decoded?.email;
+                if (targetOrder.librarianEmail) {
+                    // যদি সরাসরি অর্ডারে ইমেইল থাকে (যা আপনার ডাটাবেজে আছে)
+                    if (targetOrder.librarianEmail !== requesterEmail) {
+                        return res.status(403).json({ success: false, message: "You are not authorized to update this delivery." });
+                    }
+                } else {
+                    // ব্যাকআপ লজিক: যদি কোনো অর্ডারে librarianEmail মিসিং থাকে
+                    const bookQuery = ObjectId.isValid(targetOrder.bookId)
+                        ? { _id: new ObjectId(targetOrder.bookId) }
+                        : { _id: targetOrder.bookId };
 
-                const bookOfOrder = await addBooksCollection.findOne(bookQuery);
+                    const bookOfOrder = await addBooksCollection.findOne(bookQuery);
 
-                if (!bookOfOrder || bookOfOrder.librarianEmail !== req.decoded?.email) {
-                    return res.status(403).json({ success: false, message: "You are not authorized to update this delivery." });
+                    if (!bookOfOrder || bookOfOrder.librarianEmail !== requesterEmail) {
+                        return res.status(403).json({ success: false, message: "You are not authorized to update this delivery." });
+                    }
                 }
 
+                // ডাটাবেজে আপডেট করা
                 const result = await deliveriesCollection.updateOne(
                     { _id: new ObjectId(id) },
                     { $set: { status: lowerStatus, updatedAt: new Date() } }
                 );
 
+                // ফ্রন্টএন্ডের payment.js এর সাথে মিল রেখে রেসপন্স পাঠানো
                 res.status(200).json({
-                    success: true,
-                    message: `Delivery status updated to ${lowerStatus}`,
+                    success: true, // এটি ফ্রন্টএন্ড UI রিফ্রেশ করতে সাহায্য করবে
+                    message: `Delivery status updated to ${lowerStatus} successfully! 🎉`,
                     modifiedCount: result.modifiedCount
                 });
+
             } catch (err) {
                 console.error("Delivery status update error:", err);
                 res.status(500).json({ success: false, message: "Server error during status shift." });
